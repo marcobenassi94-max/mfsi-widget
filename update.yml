@@ -1,0 +1,35 @@
+name: MFSI Daily Update
+
+on:
+  schedule:
+    # Ogni giorno feriale alle 19:00 UTC (21:00 ora italiana estate, 20:00 inverno)
+    - cron: '0 19 * * 1-5'
+  workflow_dispatch:
+    # Permette di lanciare l'aggiornamento manualmente dalla scheda Actions su GitHub
+
+jobs:
+  update-mfsi:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installa dipendenze
+        run: pip install yfinance
+
+      - name: Esegui lo script MFSI
+        run: python mfsi_updater.py
+
+      - name: Salva data.json nel repository
+        run: |
+          git config user.email "mfsi-bot@noreply.github.com"
+          git config user.name "MFSI Bot"
+          git add data.json
+          git commit -m "MFSI update $(date +'%Y-%m-%d')" || echo "Nessuna modifica rilevata"
+          git push

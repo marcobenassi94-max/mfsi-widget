@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multi-Factor Sentinel Index</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0d0f12;
+    --surface: #141720;
+    --surface2: #1c2030;
+    --border: rgba(255,255,255,0.07);
+    --text: #f0f2f7;
+    --muted: #6b7280;
+    --accent: #1D9E75;
+    --green: #22c55e;
+    --amber: #f59e0b;
+    --red: #ef4444;
+    --green-bg: rgba(34,197,94,0.1);
+    --amber-bg: rgba(245,158,11,0.1);
+    --red-bg: rgba(239,68,68,0.1);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 300;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: 20px;
+    padding: 2rem;
+    width: 100%;
+    max-width: 460px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(29,158,117,0.5), transparent);
+  }
+
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1.75rem;
+  }
+
+  .title {
+    font-family: 'DM Serif Display', serif;
+    font-size: 15px;
+    letter-spacing: 0.02em;
+    color: var(--text);
+    opacity: 0.9;
+  }
+
+  .subtitle {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+    font-family: 'DM Mono', monospace;
+  }
+
+  .update-badge {
+    font-size: 10px;
+    font-family: 'DM Mono', monospace;
+    color: var(--muted);
+    background: var(--surface2);
+    padding: 4px 10px;
+    border-radius: 99px;
+    border: 0.5px solid var(--border);
+  }
+
+  .score-section {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    margin-bottom: 1.75rem;
+  }
+
+  .score-number {
+    font-family: 'DM Serif Display', serif;
+    font-size: 80px;
+    line-height: 1;
+    color: var(--text);
+    min-width: 130px;
+    position: relative;
+  }
+
+  .score-number span {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 22px;
+    color: var(--muted);
+    font-weight: 300;
+    vertical-align: super;
+  }
+
+  .semaforo-col {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .led {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    opacity: 0.12;
+    transition: opacity 0.5s, box-shadow 0.5s;
+  }
+
+  .led.active-green {
+    background: var(--green);
+    opacity: 1;
+    box-shadow: 0 0 14px rgba(34,197,94,0.6);
+  }
+  .led.active-amber {
+    background: var(--amber);
+    opacity: 1;
+    box-shadow: 0 0 14px rgba(245,158,11,0.6);
+  }
+  .led.active-red {
+    background: var(--red);
+    opacity: 1;
+    box-shadow: 0 0 14px rgba(239,68,68,0.6);
+  }
+
+  .led-green-off { background: #166534; }
+  .led-amber-off { background: #78350f; }
+  .led-red-off   { background: #7f1d1d; }
+
+  .signal-info { flex: 1; }
+
+  .signal-label {
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+    color: var(--muted);
+  }
+
+  .signal-pill {
+    display: inline-block;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 6px 14px;
+    border-radius: 99px;
+    margin-bottom: 10px;
+    transition: all 0.5s;
+  }
+
+  .signal-desc {
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: var(--muted);
+  }
+
+  .gauge-wrap {
+    margin-bottom: 1.75rem;
+  }
+
+  .gauge-track {
+    height: 6px;
+    background: var(--surface2);
+    border-radius: 99px;
+    overflow: hidden;
+    margin-bottom: 6px;
+  }
+
+  .gauge-fill {
+    height: 100%;
+    border-radius: 99px;
+    background: linear-gradient(90deg, #ef4444 0%, #f59e0b 45%, #22c55e 80%);
+    transition: width 1s cubic-bezier(0.4,0,0.2,1);
+  }
+
+  .gauge-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    font-family: 'DM Mono', monospace;
+    color: var(--muted);
+  }
+
+  .divider {
+    height: 0.5px;
+    background: var(--border);
+    margin: 1.5rem 0;
+  }
+
+  .factors-title {
+    font-size: 11px;
+    font-family: 'DM Mono', monospace;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 1rem;
+  }
+
+  .factor-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+
+  .factor-name {
+    font-size: 12px;
+    color: var(--muted);
+    width: 130px;
+    flex-shrink: 0;
+  }
+
+  .factor-bar-bg {
+    flex: 1;
+    height: 4px;
+    background: var(--surface2);
+    border-radius: 99px;
+    overflow: hidden;
+  }
+
+  .factor-bar {
+    height: 100%;
+    border-radius: 99px;
+    transition: width 1s ease;
+  }
+
+  .factor-score {
+    font-size: 12px;
+    font-family: 'DM Mono', monospace;
+    color: var(--text);
+    width: 28px;
+    text-align: right;
+  }
+
+  .factor-weight {
+    font-size: 10px;
+    color: var(--muted);
+    width: 28px;
+    text-align: right;
+    font-family: 'DM Mono', monospace;
+  }
+
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 1.5rem;
+  }
+
+  .footer-brand {
+    font-size: 11px;
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+  }
+
+  .footer-note {
+    font-size: 10px;
+    color: var(--muted);
+    opacity: 0.5;
+  }
+
+  @keyframes pulse-green { 0%,100%{box-shadow:0 0 14px rgba(34,197,94,0.6)} 50%{box-shadow:0 0 22px rgba(34,197,94,0.9)} }
+  @keyframes pulse-amber { 0%,100%{box-shadow:0 0 14px rgba(245,158,11,0.6)} 50%{box-shadow:0 0 22px rgba(245,158,11,0.9)} }
+  @keyframes pulse-red   { 0%,100%{box-shadow:0 0 14px rgba(239,68,68,0.6)}  50%{box-shadow:0 0 22px rgba(239,68,68,0.9)}  }
+
+  .led.active-green { animation: pulse-green 2s ease-in-out infinite; }
+  .led.active-amber { animation: pulse-amber 2s ease-in-out infinite; }
+  .led.active-red   { animation: pulse-red   2s ease-in-out infinite; }
+
+  @media (max-width: 380px) {
+    .score-number { font-size: 60px; min-width: 100px; }
+    .factor-name { width: 100px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="header">
+    <div>
+      <div class="title">Multi-Factor Sentinel Index</div>
+      <div class="subtitle">MFSI · 5-Factor Market Signal</div>
+    </div>
+    <div class="update-badge" id="last-update">caricamento...</div>
+  </div>
+
+  <div class="score-section">
+    <div>
+      <div class="score-number" id="score-display">—<span>/100</span></div>
+    </div>
+    <div class="semaforo-col">
+      <div class="led led-green-off" id="led-green"></div>
+      <div class="led led-amber-off" id="led-amber"></div>
+      <div class="led led-red-off"   id="led-red"></div>
+    </div>
+    <div class="signal-info">
+      <div class="signal-label">Segnale</div>
+      <div class="signal-pill" id="signal-pill">—</div>
+      <div class="signal-desc" id="signal-desc">Caricamento dati in corso...</div>
+    </div>
+  </div>
+
+  <div class="gauge-wrap">
+    <div class="gauge-track">
+      <div class="gauge-fill" id="gauge-fill" style="width:0%"></div>
+    </div>
+    <div class="gauge-labels">
+      <span>0 Vendi</span>
+      <span>50 Neutro</span>
+      <span>100 Compra</span>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="factors-title">5 Fattori ponderati</div>
+
+  <div class="factor-row">
+    <div class="factor-name">VIX</div>
+    <div class="factor-bar-bg"><div class="factor-bar" id="bar-vix" style="width:0%"></div></div>
+    <div class="factor-score" id="val-vix">—</div>
+    <div class="factor-weight">40%</div>
+  </div>
+  <div class="factor-row">
+    <div class="factor-name">Spread BTP-Bund</div>
+    <div class="factor-bar-bg"><div class="factor-bar" id="bar-spread" style="width:0%"></div></div>
+    <div class="factor-score" id="val-spread">—</div>
+    <div class="factor-weight">15%</div>
+  </div>
+  <div class="factor-row">
+    <div class="factor-name">Dollar Index DXY</div>
+    <div class="factor-bar-bg"><div class="factor-bar" id="bar-dxy" style="width:0%"></div></div>
+    <div class="factor-score" id="val-dxy">—</div>
+    <div class="factor-weight">15%</div>
+  </div>
+  <div class="factor-row">
+    <div class="factor-name">Oro</div>
+    <div class="factor-bar-bg"><div class="factor-bar" id="bar-gold" style="width:0%"></div></div>
+    <div class="factor-score" id="val-gold">—</div>
+    <div class="factor-weight">10%</div>
+  </div>
+  <div class="factor-row">
+    <div class="factor-name">Momentum 6m</div>
+    <div class="factor-bar-bg"><div class="factor-bar" id="bar-mom" style="width:0%"></div></div>
+    <div class="factor-score" id="val-mom">—</div>
+    <div class="factor-weight">20%</div>
+  </div>
+
+  <div class="footer">
+    <div class="footer-brand">mfsi.widget v1.0</div>
+    <div class="footer-note">Non è consulenza finanziaria</div>
+  </div>
+</div>
+
+<script>
+// ── CONFIGURAZIONE ──────────────────────────────────────────────
+// Il widget legge i dati dal file data.json generato ogni giorno
+// dallo script Python. Modifica solo DATA_URL se cambi il percorso.
+const DATA_URL = './data.json';
+
+// Fallback se il file non è ancora disponibile (valori di esempio)
+const FALLBACK = {
+  score: 68,
+  date: "dati di esempio",
+  factors: { vix: 74, spread: 88, dxy: 48, gold: 42, mom: 35 }
+};
+// ────────────────────────────────────────────────────────────────
+
+function barColor(v) {
+  if (v >= 65) return '#22c55e';
+  if (v >= 40) return '#f59e0b';
+  return '#ef4444';
+}
+
+function applyData(d) {
+  const s = Math.round(d.score);
+  const f = d.factors;
+
+  document.getElementById('score-display').innerHTML = s + '<span>/100</span>';
+  document.getElementById('gauge-fill').style.width = s + '%';
+  document.getElementById('last-update').textContent = d.date || '—';
+
+  // LED semaforo
+  const lg = document.getElementById('led-green');
+  const la = document.getElementById('led-amber');
+  const lr = document.getElementById('led-red');
+  lg.className = 'led led-green-off';
+  la.className = 'led led-amber-off';
+  lr.className = 'led led-red-off';
+
+  const pill = document.getElementById('signal-pill');
+  const desc = document.getElementById('signal-desc');
+
+  if (s >= 65) {
+    lg.className = 'led active-green';
+    pill.textContent = 'COMPRA / ACCUMULA';
+    pill.style.cssText = 'background:rgba(34,197,94,0.15);color:#4ade80;display:inline-block;font-size:13px;font-weight:500;padding:6px 14px;border-radius:99px;margin-bottom:10px;';
+    desc.textContent = 'Il VIX è rientrato dai picchi. Lo Spread BTP-Bund rimane contenuto. Contesto favorevole per incrementare l\'esposizione azionaria gradualmente.';
+  } else if (s >= 40) {
+    la.className = 'led active-amber';
+    pill.textContent = 'NEUTRO / ATTENDI';
+    pill.style.cssText = 'background:rgba(245,158,11,0.15);color:#fbbf24;display:inline-block;font-size:13px;font-weight:500;padding:6px 14px;border-radius:99px;margin-bottom:10px;';
+    desc.textContent = 'Segnali contrastanti tra i fattori. Trend non ancora confermato. Mantenere l\'esposizione attuale senza variazioni significative.';
+  } else {
+    lr.className = 'led active-red';
+    pill.textContent = 'CAUTELA / RIDUCI';
+    pill.style.cssText = 'background:rgba(239,68,68,0.15);color:#f87171;display:inline-block;font-size:13px;font-weight:500;padding:6px 14px;border-radius:99px;margin-bottom:10px;';
+    desc.textContent = 'Condizioni macro deteriorate. Dollaro forte, momentum negativo o spread in allargamento. Valutare una riduzione dell\'esposizione.';
+  }
+
+  // Barre fattori
+  [['vix', f.vix], ['spread', f.spread], ['dxy', f.dxy], ['gold', f.gold], ['mom', f.mom]].forEach(([id, v]) => {
+    document.getElementById('bar-' + id).style.width = v + '%';
+    document.getElementById('bar-' + id).style.background = barColor(v);
+    document.getElementById('val-' + id).textContent = Math.round(v);
+  });
+}
+
+// Carica data.json; se fallisce usa i valori di fallback
+fetch(DATA_URL + '?t=' + Date.now())
+  .then(r => { if (!r.ok) throw new Error('no file'); return r.json(); })
+  .then(applyData)
+  .catch(() => applyData(FALLBACK));
+</script>
+</body>
+</html>
