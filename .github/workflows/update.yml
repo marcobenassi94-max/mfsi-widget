@@ -1,7 +1,7 @@
 name: MFSI Daily Update
 on:
   schedule:
-    - cron: '0 19 * * 1-5'
+    - cron: '0 9,12,15,17,19 * * 1-5'
   workflow_dispatch:
 jobs:
   update-mfsi:
