@@ -1,12 +1,12 @@
 {
-  "score": 42.3,
-  "date": "Aggiornato il 14/07/2026",
-  "timestamp": "2026-07-14T20:03:28.219579+00:00",
+  "score": 41.9,
+  "date": "Aggiornato il 15/07/2026",
+  "timestamp": "2026-07-15T10:40:36.654605+00:00",
   "factors": {
-    "vix": 16.7,
+    "vix": 16.6,
     "spread": 75.0,
-    "dxy": 13.0,
+    "dxy": 11.4,
     "gold": 80.0,
-    "mom": 72.3
+    "mom": 71.7
   }
 }
