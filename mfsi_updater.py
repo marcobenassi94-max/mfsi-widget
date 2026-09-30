@@ -1,18 +1,29 @@
 """
-MFSI – Multi-Factor Sentinel Index
-Script di aggiornamento automatico giornaliero
+MFSI / SISO – Multi-Factor Sentinel Index
+Script di aggiornamento automatico – v2.0
 
-Scarica i dati di mercato da Yahoo Finance e genera data.json
-che il widget HTML legge per aggiornarsi.
+Scarica i dati di mercato e genera data.json letto dal widget HTML.
+Il formato di data.json è retrocompatibile (score, date, factors):
+i campi aggiuntivi "raw" e "status" servono solo per verifica e debug.
+
+Novità v2.0 rispetto alla v1:
+  - VIX: mappatura per regimi sul livello assoluto (non più min-max su 12 mesi)
+  - DXY: combinazione di livello (percentile 5 anni) e velocità (variazione 3 mesi)
+  - Spread BTP-Bund: dato reale da API BCE (prima era un valore fisso a 120 bp)
+  - Oro: scala continua invece di 5 gradini
+  - Controlli su dati mancanti o non aggiornati, con esito tracciato in data.json
 
 Dipendenze: pip install yfinance
 Esecuzione:  python mfsi_updater.py
-Automazione: vedi istruzioni in fondo al file
 """
 
+import csv
+import io
 import json
-import os
+import urllib.request
 from datetime import datetime, timezone
+
+import numpy as np
 
 try:
     import yfinance as yf
@@ -21,187 +32,216 @@ except ImportError:
     raise
 
 # ── CONFIGURAZIONE ──────────────────────────────────────────────
-OUTPUT_FILE = "data.json"   # file letto dal widget HTML
-MSCI_PROXY  = "^GSPC"      # S&P 500 come proxy MSCI World
+OUTPUT_FILE = "data.json"
+MSCI_PROXY  = "^GSPC"          # S&P 500 come proxy dell'azionario globale
+
+PESI = {"vix": 0.40, "spread": 0.15, "dxy": 0.15, "gold": 0.10, "mom": 0.20}
+
+# Spread BTP-Bund: se impostato (es. 115), ha la precedenza sull'API BCE.
+# Lasciare None per usare il dato automatico.
+SPREAD_BP_MANUALE = None
+
+MAX_GIORNI_DATO = 7            # oltre questa età un dato è considerato non aggiornato
 # ────────────────────────────────────────────────────────────────
 
+stato = {}   # esito per fattore: "ok" oppure motivo del valore di ripiego
+raw   = {}   # valori grezzi di mercato, pubblicati per verifica
+
+
+def interp(x, xs, ys):
+    """Interpolazione lineare a tratti, con saturazione agli estremi."""
+    return float(np.interp(x, xs, ys))
+
+
+def serie_valida(s, nome):
+    """Restituisce la serie pulita, oppure None se vuota o non aggiornata."""
+    s = s.dropna()
+    if len(s) < 2:
+        stato[nome] = "dati mancanti"
+        return None
+    ultimo = s.index[-1]
+    if hasattr(ultimo, "to_pydatetime"):
+        ultimo = ultimo.to_pydatetime()
+    if ultimo.tzinfo is None:
+        ultimo = ultimo.replace(tzinfo=timezone.utc)
+    eta = (datetime.now(timezone.utc) - ultimo).days
+    if eta > MAX_GIORNI_DATO:
+        stato[nome] = f"dato fermo da {eta} giorni"
+        return None
+    return s
+
+
 def scarica_dati():
-    """Scarica 1 anno di dati per tutti i ticker necessari."""
-    tickers = ["^VIX", "^GSPC", "DX-Y.NYB", "GC=F"]
+    """5 anni di storico: servono per percentile DXY e media mobile a 200 giorni."""
+    tickers = ["^VIX", MSCI_PROXY, "DX-Y.NYB", "GC=F"]
     print("Scaricamento dati da Yahoo Finance...")
-    data = yf.download(tickers, period="1y", auto_adjust=True, progress=False)["Close"]
+    data = yf.download(tickers, period="5y", auto_adjust=True, progress=False)["Close"]
     data.dropna(how="all", inplace=True)
     print(f"  Scaricati {len(data)} giorni di dati.")
     return data
 
+
+# ── FATTORI ─────────────────────────────────────────────────────
+
 def score_vix(data):
     """
-    VIX SCORE (peso 40%)
-    VIX alto = paura = potenziale opportunità di acquisto.
-    Score alto = VIX alto rispetto ai suoi percentili storici.
+    VIX (peso 40%) – mappatura per regimi sul livello assoluto.
+
+    Il VIX ha livelli con significato proprio (media di lungo periodo ~19),
+    quindi si usa il valore assoluto e non il min-max su 12 mesi, che rendeva
+    "minimo" qualunque VIX tranquillo dopo un anno con un picco di volatilità.
+
+      < 12   compiacenza eccessiva          -> 40-55  (prudenza)
+      12-20  mercato sereno                 -> 55-70  (contesto favorevole)
+      20-28  tensione, trend incerto        -> 55-65  (neutro)
+      > 28   panico, logica contrarian      -> 65-100 (opportunità)
     """
-    vix = data["^VIX"].dropna()
-    if len(vix) < 2:
+    s = serie_valida(data["^VIX"], "vix")
+    if s is None:
         return 50.0
+    v = float(s.iloc[-1])
+    raw["vix"] = round(v, 2)
+    stato["vix"] = "ok"
+    return round(interp(v,
+                        [9,  12, 15, 18, 20, 24, 28, 35, 45],
+                        [40, 55, 68, 70, 65, 55, 65, 85, 100]), 1)
 
-    v_last = float(vix.iloc[-1])
-    v_min  = float(vix.min())
-    v_max  = float(vix.max())
-
-    # Percentile normalizzato 0-100
-    raw = (v_last - v_min) / (v_max - v_min) * 100 if v_max != v_min else 50.0
-
-    # Un VIX a 35+ segnala panico → score molto alto (Compra)
-    # Un VIX a 12-15 segnala euforia → score basso (Cautela)
-    return round(min(100, max(0, raw)), 1)
-
-def score_spread():
-    """
-    SPREAD BTP-BUND SCORE (peso 15%)
-    Spread basso = Europa stabile = score alto (positivo).
-    
-    Yahoo Finance non fornisce dati di spread direttamente,
-    usiamo un valore manuale aggiornabile o una stima statica.
-    NOTA: Per aggiornamento automatico reale, puoi usare le API
-    di Investing.com o BundesBank (free, vedi commento sotto).
-    """
-    # Valore approssimativo attuale dello spread BTP-Bund in bp.
-    # Modifica questo valore manualmente se non hai un'API live.
-    # Oppure integra: https://api.bundesbank.de/service/data/BBDP1
-    spread_bp_stimato = 120  # esempio: 120 punti base
-
-    # Score inverso: spread alto = rischio = score basso
-    if spread_bp_stimato < 100:
-        return 90.0
-    elif spread_bp_stimato < 150:
-        return 75.0
-    elif spread_bp_stimato < 200:
-        return 55.0
-    elif spread_bp_stimato < 300:
-        return 30.0
-    else:
-        return 10.0
 
 def score_dxy(data):
     """
-    DOLLAR INDEX SCORE (peso 15%)
-    DXY forte = stress = score basso.
-    Score = inverso del percentile del DXY su 1 anno.
+    Dollar Index (peso 15%) – livello e velocità.
+
+    Livello: percentile del valore attuale sugli ultimi 5 anni (invertito).
+    Velocità: variazione % a 3 mesi; un rafforzamento rapido penalizza.
+    I due componenti pesano 50% ciascuno, coerentemente con il tooltip
+    ("quando il dollaro si rafforza troppo e velocemente").
     """
-    dxy = data["DX-Y.NYB"].dropna()
-    if len(dxy) < 2:
+    s = serie_valida(data["DX-Y.NYB"], "dxy")
+    if s is None or len(s) < 70:
+        stato.setdefault("dxy", "storico insufficiente")
         return 50.0
+    v = float(s.iloc[-1])
+    percentile = float((s < v).mean() * 100)
+    var_3m = float(v / s.iloc[-63] - 1) * 100
+    s_livello  = 100 - percentile
+    s_velocita = interp(var_3m, [-6, -3, 0, 3, 6], [90, 70, 55, 30, 10])
+    raw["dxy"] = round(v, 2)
+    raw["dxy_var_3m_pct"] = round(var_3m, 2)
+    stato["dxy"] = "ok"
+    return round(0.5 * s_livello + 0.5 * s_velocita, 1)
 
-    v_last = float(dxy.iloc[-1])
-    v_min  = float(dxy.min())
-    v_max  = float(dxy.max())
 
-    if v_max == v_min:
-        return 50.0
+def rendimento_bce(paese):
+    """Ultimo rendimento decennale mensile (criterio di convergenza) dalla BCE."""
+    url = (f"https://data-api.ecb.europa.eu/service/data/IRS/"
+           f"M.{paese}.L.L40.CI.0000.EUR.N.Z?lastNObservations=1&format=csvdata")
+    with urllib.request.urlopen(url, timeout=20) as r:
+        righe = list(csv.DictReader(io.StringIO(r.read().decode("utf-8"))))
+    ultima = righe[-1]
+    return float(ultima["OBS_VALUE"]), ultima["TIME_PERIOD"]
 
-    # Più il DXY è alto rispetto al range, più il score scende
-    pct = (v_last - v_min) / (v_max - v_min) * 100
-    return round(min(100, max(0, 100 - pct)), 1)
+
+def score_spread():
+    """
+    Spread BTP-Bund (peso 15%) – spread basso = score alto.
+    Fonte: BCE, rendimenti decennali Italia e Germania (media mensile).
+    Il dato è mensile: lo spread si muove lentamente, e per un fattore
+    al 15% è un compromesso accettabile rispetto a fonti a pagamento.
+    """
+    if SPREAD_BP_MANUALE is not None:
+        bp, fonte = float(SPREAD_BP_MANUALE), "valore manuale"
+    else:
+        try:
+            it, mese = rendimento_bce("IT")
+            de, _    = rendimento_bce("DE")
+            bp, fonte = (it - de) * 100, f"BCE, media mensile {mese}"
+        except Exception as e:
+            stato["spread"] = f"API BCE non raggiungibile ({type(e).__name__})"
+            return 50.0
+    raw["spread_bp"] = round(bp, 1)
+    raw["spread_fonte"] = fonte
+    stato["spread"] = "ok"
+    return round(interp(bp, [80, 100, 150, 200, 300, 400],
+                            [95, 90,  70,  50,  25,  5]), 1)
+
 
 def score_gold(data):
     """
-    ORO SCORE (peso 10%)
-    Oro in salita mentre azionario scende → conferma ribasso → score basso.
-    Oro stabile o in calo → nessuna fuga verso safe haven → score alto.
+    Oro (peso 10%) – divergenza oro/azionario sulle ultime 4 settimane.
+    Oro che sale mentre la borsa scende = fuga verso la sicurezza = score basso.
     """
-    gold = data["GC=F"].dropna()
-    mkt  = data["^GSPC"].dropna()
-
-    if len(gold) < 20 or len(mkt) < 20:
+    gold = serie_valida(data["GC=F"], "gold")
+    mkt  = serie_valida(data[MSCI_PROXY], "gold")
+    if gold is None or mkt is None or len(gold) < 21 or len(mkt) < 21:
+        stato.setdefault("gold", "dati mancanti")
         return 50.0
+    ret_gold = float(gold.iloc[-1] / gold.iloc[-21] - 1) * 100
+    ret_mkt  = float(mkt.iloc[-1]  / mkt.iloc[-21]  - 1) * 100
+    div = ret_gold - ret_mkt
+    raw["oro_vs_borsa_4sett_pct"] = round(div, 2)
+    stato["gold"] = "ok"
+    return round(interp(div, [-5, -2, 0, 2, 5], [85, 70, 55, 38, 20]), 1)
 
-    # Divergenza: rendimento oro vs mercato negli ultimi 20 giorni
-    ret_gold = float(gold.iloc[-1] / gold.iloc[-20] - 1) * 100
-    ret_mkt  = float(mkt.iloc[-1]  / mkt.iloc[-20]  - 1) * 100
-
-    divergenza = ret_gold - ret_mkt  # positivo = oro sale, mercato scende
-
-    if divergenza > 5:
-        return 20.0   # forte segnale di rifugio → ribasso confermato
-    elif divergenza > 2:
-        return 38.0
-    elif divergenza > 0:
-        return 52.0
-    elif divergenza > -2:
-        return 65.0
-    else:
-        return 80.0   # oro scende, mercato sale → clima risk-on
 
 def score_momentum(data):
     """
-    MOMENTUM SCORE (peso 20%)
-    Mercato sopra media 200 giorni = trend positivo = score alto.
-    Mercato sotto media 50 giorni = trend debole = score basso.
+    Momentum (peso 20%) – posizione dell'indice rispetto alle medie 50 e 200 giorni.
+    Logica invariata rispetto alla v1.
     """
-    mkt = data["^GSPC"].dropna()
-
-    if len(mkt) < 200:
+    mkt = serie_valida(data[MSCI_PROXY], "mom")
+    if mkt is None or len(mkt) < 200:
+        stato.setdefault("mom", "storico insufficiente")
         return 50.0
+    v       = float(mkt.iloc[-1])
+    sma_50  = float(mkt.rolling(50).mean().iloc[-1])
+    sma_200 = float(mkt.rolling(200).mean().iloc[-1])
+    dist_200 = (v - sma_200) / sma_200 * 100
 
-    v_last   = float(mkt.iloc[-1])
-    sma_50   = float(mkt.rolling(50).mean().iloc[-1])
-    sma_200  = float(mkt.rolling(200).mean().iloc[-1])
-
-    sopra_200 = v_last > sma_200
-    sopra_50  = v_last > sma_50
-
-    # Distanza percentuale dalla SMA 200 (normalizzata)
-    dist_200 = (v_last - sma_200) / sma_200 * 100
-
-    if sopra_200 and sopra_50:
-        # Trend forte: più siamo sopra la 200, più il momentum è solido
+    if v > sma_200 and v > sma_50:
         s = min(85, 60 + dist_200 * 1.5)
-    elif sopra_200 and not sopra_50:
-        # Sopra 200 ma sotto 50: fase di correzione nel trend rialzista
+    elif v > sma_200:
         s = 45.0
-    elif not sopra_200 and v_last > sma_50:
-        # Rimbalzo tecnico in bear market
+    elif v > sma_50:
         s = 30.0
     else:
-        # Sotto entrambe: trend ribassista
         s = max(5, 20 + dist_200)
 
+    raw["borsa_dist_sma200_pct"] = round(dist_200, 2)
+    stato["mom"] = "ok"
     return round(min(100, max(0, s)), 1)
 
+
+# ── OUTPUT ──────────────────────────────────────────────────────
+
 def calcola_score(f):
-    """Calcola il punteggio finale pesato (0-100)."""
-    return round(
-        f["vix"]    * 0.40 +
-        f["spread"] * 0.15 +
-        f["dxy"]    * 0.15 +
-        f["gold"]   * 0.10 +
-        f["mom"]    * 0.20,
-        1
-    )
+    return round(sum(f[k] * PESI[k] for k in PESI), 1)
+
 
 def genera_json(score, factors):
-    """Genera il file data.json letto dal widget HTML."""
     now = datetime.now(timezone.utc)
-    data = {
+    out = {
         "score": score,
         "date": now.strftime("Aggiornato il %d/%m/%Y"),
         "timestamp": now.isoformat(),
-        "factors": factors
+        "factors": factors,
+        "raw": raw,
+        "status": stato,
     }
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+        json.dump(out, f, indent=2, ensure_ascii=False)
     print(f"\nScritto {OUTPUT_FILE}:")
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+
 
 def main():
     print("=" * 50)
-    print(" MFSI – Multi-Factor Sentinel Index Updater")
+    print(" MFSI / SISO – Updater v2.0")
     print("=" * 50)
 
     try:
         data = scarica_dati()
     except Exception as e:
-        print(f"Errore nel download: {e}")
+        print(f"Errore nel download: {e} – data.json non modificato.")
         return
 
     factors = {
@@ -212,72 +252,20 @@ def main():
         "mom":    score_momentum(data),
     }
 
+    # Se più di due fattori sono di ripiego, meglio non pubblicare un segnale falsato
+    ripieghi = [k for k, v in stato.items() if v != "ok"]
+    if len(ripieghi) > 2:
+        print(f"Troppi fattori senza dati validi ({ripieghi}) – data.json non modificato.")
+        return
+
     score = calcola_score(factors)
 
-    print(f"\nFattori calcolati:")
-    print(f"  VIX Score     (40%): {factors['vix']}")
-    print(f"  Spread Score  (15%): {factors['spread']}")
-    print(f"  DXY Score     (15%): {factors['dxy']}")
-    print(f"  Gold Score    (10%): {factors['gold']}")
-    print(f"  Momentum Score(20%): {factors['mom']}")
+    print("\nFattori:")
+    for k in PESI:
+        print(f"  {k:<7} ({int(PESI[k]*100)}%): {factors[k]:>5}   [{stato.get(k)}]")
     print(f"\n  SCORE FINALE: {score}/100")
-
-    if score >= 65:
-        print("  SEGNALE: COMPRA / ACCUMULA")
-    elif score >= 40:
-        print("  SEGNALE: NEUTRO / ATTENDI")
-    else:
-        print("  SEGNALE: CAUTELA / RIDUCI")
-
     genera_json(score, factors)
-    print("\nAggiornamento completato.")
+
 
 if __name__ == "__main__":
     main()
-
-
-# ================================================================
-# ISTRUZIONI PER L'AUTOMAZIONE GIORNALIERA
-# ================================================================
-#
-# OPZIONE A — GitHub Actions (GRATUITA, consigliata)
-# ─────────────────────────────────────────────────
-# 1. Crea un repository GitHub (es. "mfsi-widget")
-# 2. Carica in esso: mfsi-widget.html, mfsi_updater.py, data.json
-# 3. Crea il file .github/workflows/update.yml con:
-#
-#   name: MFSI Daily Update
-#   on:
-#     schedule:
-#       - cron: '0 19 * * 1-5'   # ogni giorno feriale alle 19:00 UTC
-#     workflow_dispatch:           # permette lancio manuale
-#   jobs:
-#     update:
-#       runs-on: ubuntu-latest
-#       steps:
-#         - uses: actions/checkout@v4
-#         - uses: actions/setup-python@v5
-#           with: { python-version: '3.11' }
-#         - run: pip install yfinance
-#         - run: python mfsi_updater.py
-#         - run: |
-#             git config user.email "bot@mfsi"
-#             git config user.name "MFSI Bot"
-#             git add data.json
-#             git commit -m "Update MFSI $(date +'%Y-%m-%d')" || echo "No changes"
-#             git push
-#
-# 4. Abilita GitHub Pages per il repository (Settings → Pages)
-#    e imposta DATA_URL nel widget su:
-#    "https://TUO_UTENTE.github.io/mfsi-widget/data.json"
-#
-# OPZIONE B — Server Linux (cron)
-# ────────────────────────────────
-# Aggiungi al crontab (crontab -e):
-#   0 19 * * 1-5 cd /var/www/html/mfsi && python3 mfsi_updater.py
-#
-# OPZIONE C — Windows Task Scheduler
-# ────────────────────────────────────
-# Crea un'attività pianificata che esegue ogni giorno:
-#   python C:\percorso\mfsi_updater.py
-# ================================================================
