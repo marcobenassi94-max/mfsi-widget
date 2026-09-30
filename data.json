@@ -1,12 +1,28 @@
 {
-  "score": 39.7,
+  "score": 72.2,
   "date": "Aggiornato il 30/09/2026",
-  "timestamp": "2026-09-30T15:26:21.627483+00:00",
+  "timestamp": "2026-09-30T16:35:07.955468+00:00",
   "factors": {
-    "vix": 13.5,
-    "spread": 75.0,
-    "dxy": 6.6,
-    "gold": 80.0,
+    "vix": 68.6,
+    "spread": 95.0,
+    "dxy": 53.4,
+    "gold": 85.0,
     "mom": 70.2
+  },
+  "raw": {
+    "vix": 15.86,
+    "spread_bp": 80.1,
+    "spread_fonte": "BCE, media mensile 2026-08",
+    "dxy": 101.4,
+    "dxy_var_3m_pct": 0.54,
+    "oro_vs_borsa_4sett_pct": -5.63,
+    "borsa_dist_sma200_pct": 6.82
+  },
+  "status": {
+    "vix": "ok",
+    "spread": "ok",
+    "dxy": "ok",
+    "gold": "ok",
+    "mom": "ok"
   }
 }
