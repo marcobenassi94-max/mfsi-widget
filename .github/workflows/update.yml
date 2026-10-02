@@ -1,7 +1,9 @@
 name: MFSI Daily Update
 on:
   schedule:
-    - cron: '0 9,12,15,17,19 * * 1-5'
+    # Una volta al giorno, dopo la chiusura di Wall Street (22:00 UTC = 18:00 New York in ora legale, 17:00 in ora solare).
+    # Le esecuzioni durante la seduta usavano prezzi intraday e facevano oscillare lo score nella stessa giornata.
+    - cron: '0 22 * * 1-5'
   workflow_dispatch:
 jobs:
   update-mfsi:
