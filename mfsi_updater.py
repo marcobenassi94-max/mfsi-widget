@@ -1,10 +1,13 @@
 """
 MFSI / SISO – Multi-Factor Sentinel Index
-Script di aggiornamento automatico – v2.0
+Script di aggiornamento automatico – v2.1
 
 Scarica i dati di mercato e genera data.json letto dal widget HTML.
 Il formato di data.json è retrocompatibile (score, date, factors):
 i campi aggiuntivi "raw" e "status" servono solo per verifica e debug.
+
+Novità v2.1: momentum su scala continua (eliminato il salto all'incrocio
+della media a 50 giorni).
 
 Novità v2.0 rispetto alla v1:
   - VIX: mappatura per regimi sul livello assoluto (non più min-max su 12 mesi)
@@ -185,8 +188,11 @@ def score_gold(data):
 
 def score_momentum(data):
     """
-    Momentum (peso 20%) – posizione dell'indice rispetto alle medie 50 e 200 giorni.
-    Logica invariata rispetto alla v1.
+    Momentum (peso 20%) – distanza dell'indice dalle medie a 200 e 50 giorni.
+    Scala continua: niente salti quando il prezzo incrocia una media
+    (nella v1/v2.0 l'incrocio della media a 50 giorni spostava il fattore
+    di circa 24 punti in un colpo, e lo score totale di circa 5).
+    Trend di fondo (SMA 200) pesa 70%, trend di breve (SMA 50) pesa 30%.
     """
     mkt = serie_valida(data[MSCI_PROXY], "mom")
     if mkt is None or len(mkt) < 200:
@@ -196,19 +202,15 @@ def score_momentum(data):
     sma_50  = float(mkt.rolling(50).mean().iloc[-1])
     sma_200 = float(mkt.rolling(200).mean().iloc[-1])
     dist_200 = (v - sma_200) / sma_200 * 100
+    dist_50  = (v - sma_50)  / sma_50  * 100
 
-    if v > sma_200 and v > sma_50:
-        s = min(85, 60 + dist_200 * 1.5)
-    elif v > sma_200:
-        s = 45.0
-    elif v > sma_50:
-        s = 30.0
-    else:
-        s = max(5, 20 + dist_200)
+    s200 = interp(dist_200, [-10, -5, 0, 5, 10], [10, 25, 45, 70, 85])
+    s50  = interp(dist_50,  [-5, -2, 0, 2, 5],   [20, 35, 50, 65, 80])
 
     raw["borsa_dist_sma200_pct"] = round(dist_200, 2)
+    raw["borsa_dist_sma50_pct"]  = round(dist_50, 2)
     stato["mom"] = "ok"
-    return round(min(100, max(0, s)), 1)
+    return round(0.7 * s200 + 0.3 * s50, 1)
 
 
 # ── OUTPUT ──────────────────────────────────────────────────────
@@ -235,7 +237,7 @@ def genera_json(score, factors):
 
 def main():
     print("=" * 50)
-    print(" MFSI / SISO – Updater v2.0")
+    print(" MFSI / SISO – Updater v2.1")
     print("=" * 50)
 
     try:
