@@ -9,8 +9,8 @@ jobs:
   update-mfsi:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - run: pip install yfinance
@@ -19,5 +19,6 @@ jobs:
           git config user.email "mfsi-bot@noreply.github.com"
           git config user.name "MFSI Bot"
           git add data.json
+          if [ -f spread_storico.json ]; then git add spread_storico.json; fi
           git commit -m "MFSI update $(date +'%Y-%m-%d')" || echo "Nessuna modifica"
           git push
