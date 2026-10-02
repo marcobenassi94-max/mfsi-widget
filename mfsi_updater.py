@@ -1,10 +1,13 @@
 """
 MFSI / SISO – Multi-Factor Sentinel Index
-Script di aggiornamento automatico – v2.1
+Script di aggiornamento automatico – v2.2
 
 Scarica i dati di mercato e genera data.json letto dal widget HTML.
 Il formato di data.json è retrocompatibile (score, date, factors):
 i campi aggiuntivi "raw" e "status" servono solo per verifica e debug.
+
+Novità v2.2: spread BTP-Bund giornaliero (Stooq) con componente di velocità;
+la BCE mensile resta solo come ripiego.
 
 Novità v2.1: momentum su scala continua (eliminato il salto all'incrocio
 della media a 50 giorni).
@@ -40,8 +43,8 @@ MSCI_PROXY  = "^GSPC"          # S&P 500 come proxy dell'azionario globale
 
 PESI = {"vix": 0.40, "spread": 0.15, "dxy": 0.15, "gold": 0.10, "mom": 0.20}
 
-# Spread BTP-Bund: se impostato (es. 115), ha la precedenza sull'API BCE.
-# Lasciare None per usare il dato automatico.
+# Spread BTP-Bund: se impostato (es. 118), ha la precedenza sulle fonti automatiche.
+# Lasciare None per usare il dato giornaliero automatico.
 SPREAD_BP_MANUALE = None
 
 MAX_GIORNI_DATO = 7            # oltre questa età un dato è considerato non aggiornato
@@ -134,38 +137,79 @@ def score_dxy(data):
     return round(0.5 * s_livello + 0.5 * s_velocita, 1)
 
 
+def _csv(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (MFSI updater)"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return list(csv.DictReader(io.StringIO(r.read().decode("utf-8"))))
+
+
+def spread_giornaliero():
+    """
+    Spread giornaliero da Stooq (rendimenti decennali IT e DE, chiusura di ogni giorno).
+    Restituisce (spread_attuale_bp, variazione_1_mese_bp, data_ultimo_dato).
+    """
+    serie = {}
+    for paese, ticker in (("IT", "10ity.b"), ("DE", "10dey.b")):
+        righe = _csv(f"https://stooq.com/q/d/l/?s={ticker}&i=d")
+        serie[paese] = {r["Date"]: float(r["Close"]) for r in righe if r.get("Close")}
+    date_comuni = sorted(set(serie["IT"]) & set(serie["DE"]))
+    if len(date_comuni) < 25:
+        raise ValueError("storico spread insufficiente")
+    ultima = date_comuni[-1]
+    eta = (datetime.now(timezone.utc).date() - datetime.strptime(ultima, "%Y-%m-%d").date()).days
+    if eta > 5:
+        raise ValueError(f"dato spread fermo da {eta} giorni")
+    sp = [(serie["IT"][d] - serie["DE"][d]) * 100 for d in date_comuni]
+    return sp[-1], sp[-1] - sp[-22], ultima
+
+
 def rendimento_bce(paese):
-    """Ultimo rendimento decennale mensile (criterio di convergenza) dalla BCE."""
-    url = (f"https://data-api.ecb.europa.eu/service/data/IRS/"
-           f"M.{paese}.L.L40.CI.0000.EUR.N.Z?lastNObservations=1&format=csvdata")
-    with urllib.request.urlopen(url, timeout=20) as r:
-        righe = list(csv.DictReader(io.StringIO(r.read().decode("utf-8"))))
-    ultima = righe[-1]
-    return float(ultima["OBS_VALUE"]), ultima["TIME_PERIOD"]
+    """Ripiego: ultimo rendimento decennale MENSILE dalla BCE (circa un mese di ritardo)."""
+    righe = _csv(f"https://data-api.ecb.europa.eu/service/data/IRS/"
+                 f"M.{paese}.L.L40.CI.0000.EUR.N.Z?lastNObservations=1&format=csvdata")
+    return float(righe[-1]["OBS_VALUE"]), righe[-1]["TIME_PERIOD"]
 
 
 def score_spread():
     """
-    Spread BTP-Bund (peso 15%) – spread basso = score alto.
-    Fonte: BCE, rendimenti decennali Italia e Germania (media mensile).
-    Il dato è mensile: lo spread si muove lentamente, e per un fattore
-    al 15% è un compromesso accettabile rispetto a fonti a pagamento.
+    Spread BTP-Bund (peso 15%) – livello e velocità.
+
+    Livello: lo spread assoluto (80-100 bp minimi storici recenti, oltre 180 bp tensione seria).
+    Velocità: variazione nell'ultimo mese. Un allargamento rapido (+20/30 bp) è il segnale
+    di stress più importante, anche se il livello assoluto resta moderato.
+    Pesi: 60% livello, 40% velocità.
+
+    Fonte principale: Stooq, dato giornaliero.
+    Ripiego: BCE, media mensile (solo livello, segnalato in data.json come non aggiornato).
     """
+    var_1m = None
     if SPREAD_BP_MANUALE is not None:
         bp, fonte = float(SPREAD_BP_MANUALE), "valore manuale"
     else:
         try:
-            it, mese = rendimento_bce("IT")
-            de, _    = rendimento_bce("DE")
-            bp, fonte = (it - de) * 100, f"BCE, media mensile {mese}"
+            bp, var_1m, giorno = spread_giornaliero()
+            fonte = f"Stooq, chiusura {giorno}"
         except Exception as e:
-            stato["spread"] = f"API BCE non raggiungibile ({type(e).__name__})"
-            return 50.0
+            errore = f"{type(e).__name__}: {e}"[:80]
+            try:
+                it, mese = rendimento_bce("IT")
+                de, _    = rendimento_bce("DE")
+                bp, fonte = (it - de) * 100, f"BCE media mensile {mese} (giornaliero non disponibile: {errore})"
+            except Exception as e2:
+                stato["spread"] = f"nessuna fonte disponibile ({type(e2).__name__})"
+                return 50.0
+
+    s_livello = interp(bp, [80, 100, 130, 180, 250, 400], [90, 75, 55, 35, 15, 0])
     raw["spread_bp"] = round(bp, 1)
     raw["spread_fonte"] = fonte
+    if var_1m is None:
+        stato["spread"] = "ok" if fonte == "valore manuale" else "solo dato mensile"
+        return round(s_livello, 1)
+
+    s_velocita = interp(var_1m, [-20, 0, 15, 30], [80, 60, 35, 15])
+    raw["spread_var_1m_bp"] = round(var_1m, 1)
     stato["spread"] = "ok"
-    return round(interp(bp, [80, 100, 150, 200, 300, 400],
-                            [95, 90,  70,  50,  25,  5]), 1)
+    return round(0.6 * s_livello + 0.4 * s_velocita, 1)
 
 
 def score_gold(data):
@@ -237,7 +281,7 @@ def genera_json(score, factors):
 
 def main():
     print("=" * 50)
-    print(" MFSI / SISO – Updater v2.1")
+    print(" MFSI / SISO – Updater v2.2")
     print("=" * 50)
 
     try:
