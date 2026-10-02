@@ -1,10 +1,13 @@
 """
 MFSI / SISO – Multi-Factor Sentinel Index
-Script di aggiornamento automatico – v2.2
+Script di aggiornamento automatico – v2.3
 
 Scarica i dati di mercato e genera data.json letto dal widget HTML.
 Il formato di data.json è retrocompatibile (score, date, factors):
 i campi aggiuntivi "raw" e "status" servono solo per verifica e debug.
+
+Novità v2.3: spread con fonti in sequenza (Stooq, CNBC), storico salvato nel repo,
+fattore neutro se manca un dato aggiornato, errori delle fonti riportati in data.json.
 
 Novità v2.2: spread BTP-Bund giornaliero (Stooq) con componente di velocità;
 la BCE mensile resta solo come ripiego.
@@ -47,7 +50,8 @@ PESI = {"vix": 0.40, "spread": 0.15, "dxy": 0.15, "gold": 0.10, "mom": 0.20}
 # Lasciare None per usare il dato giornaliero automatico.
 SPREAD_BP_MANUALE = None
 
-MAX_GIORNI_DATO = 7            # oltre questa età un dato è considerato non aggiornato
+MAX_GIORNI_DATO = 7
+STORICO_SPREAD  = "spread_storico.json"   # storico giornaliero dello spread, aggiornato a ogni esecuzione            # oltre questa età un dato è considerato non aggiornato
 # ────────────────────────────────────────────────────────────────
 
 stato = {}   # esito per fattore: "ok" oppure motivo del valore di ripiego
@@ -137,78 +141,138 @@ def score_dxy(data):
     return round(0.5 * s_livello + 0.5 * s_velocita, 1)
 
 
-def _csv(url):
+def _get(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (MFSI updater)"})
     with urllib.request.urlopen(req, timeout=20) as r:
-        return list(csv.DictReader(io.StringIO(r.read().decode("utf-8"))))
+        return r.read().decode("utf-8", errors="replace")
 
 
-def spread_giornaliero():
-    """
-    Spread giornaliero da Stooq (rendimenti decennali IT e DE, chiusura di ogni giorno).
-    Restituisce (spread_attuale_bp, variazione_1_mese_bp, data_ultimo_dato).
-    """
+def _anteprima(testo):
+    """Primi caratteri di una risposta inattesa, per capire cosa ha restituito la fonte."""
+    return " ".join(testo.split())[:90]
+
+
+def spread_stooq():
+    """Fonte 1 – Stooq: storico giornaliero dei decennali IT e DE (livello + variazione 1 mese)."""
     serie = {}
     for paese, ticker in (("IT", "10ity.b"), ("DE", "10dey.b")):
-        righe = _csv(f"https://stooq.com/q/d/l/?s={ticker}&i=d")
-        serie[paese] = {r["Date"]: float(r["Close"]) for r in righe if r.get("Close")}
-    date_comuni = sorted(set(serie["IT"]) & set(serie["DE"]))
-    if len(date_comuni) < 25:
-        raise ValueError("storico spread insufficiente")
-    ultima = date_comuni[-1]
-    eta = (datetime.now(timezone.utc).date() - datetime.strptime(ultima, "%Y-%m-%d").date()).days
+        testo = _get(f"https://stooq.com/q/d/l/?s={ticker}&i=d")
+        righe = list(csv.DictReader(io.StringIO(testo)))
+        serie[paese] = {r["Date"]: float(r["Close"]) for r in righe if r.get("Date") and r.get("Close")}
+        if not serie[paese]:
+            raise ValueError(f"risposta non valida per {ticker}: '{_anteprima(testo)}'")
+    date = sorted(set(serie["IT"]) & set(serie["DE"]))
+    if len(date) < 25:
+        raise ValueError(f"solo {len(date)} giorni in comune")
+    eta = (datetime.now(timezone.utc).date() - datetime.strptime(date[-1], "%Y-%m-%d").date()).days
     if eta > 5:
-        raise ValueError(f"dato spread fermo da {eta} giorni")
-    sp = [(serie["IT"][d] - serie["DE"][d]) * 100 for d in date_comuni]
-    return sp[-1], sp[-1] - sp[-22], ultima
+        raise ValueError(f"dato fermo da {eta} giorni")
+    sp = [(serie["IT"][d] - serie["DE"][d]) * 100 for d in date]
+    return sp[-1], sp[-1] - sp[-22], f"Stooq, chiusura {date[-1]}"
+
+
+def spread_cnbc():
+    """Fonte 2 – CNBC: ultima quotazione dei decennali IT e DE (solo livello)."""
+    testo = _get("https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
+                 "?symbols=IT10Y-IT%7CDE10Y-DE&requestMethod=itv&noform=1&partnerId=2"
+                 "&fund=1&exthrs=1&output=json")
+    try:
+        quotes = json.loads(testo)["FormattedQuoteResult"]["FormattedQuote"]
+        val = {q["symbol"]: float(str(q["last"]).replace("%", "").replace(",", ".")) for q in quotes}
+        bp = (val["IT10Y-IT"] - val["DE10Y-DE"]) * 100
+    except Exception:
+        raise ValueError(f"risposta non valida: '{_anteprima(testo)}'")
+    if not 0 < bp < 1000:
+        raise ValueError(f"valore fuori scala: {bp:.1f} bp")
+    return bp, None, "CNBC, ultima quotazione"
 
 
 def rendimento_bce(paese):
-    """Ripiego: ultimo rendimento decennale MENSILE dalla BCE (circa un mese di ritardo)."""
-    righe = _csv(f"https://data-api.ecb.europa.eu/service/data/IRS/"
-                 f"M.{paese}.L.L40.CI.0000.EUR.N.Z?lastNObservations=1&format=csvdata")
+    """Media MENSILE BCE del decennale (circa un mese di ritardo)."""
+    righe = list(csv.DictReader(io.StringIO(_get(
+        f"https://data-api.ecb.europa.eu/service/data/IRS/"
+        f"M.{paese}.L.L40.CI.0000.EUR.N.Z?lastNObservations=1&format=csvdata"))))
     return float(righe[-1]["OBS_VALUE"]), righe[-1]["TIME_PERIOD"]
+
+
+def spread_bce():
+    it, mese = rendimento_bce("IT")
+    de, _    = rendimento_bce("DE")
+    return (it - de) * 100, mese
+
+
+def aggiorna_storico(bp):
+    """Salva lo spread del giorno in spread_storico.json e restituisce la variazione a ~1 mese."""
+    try:
+        with open(STORICO_SPREAD, encoding="utf-8") as f:
+            storico = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        storico = {}
+    storico[datetime.now(timezone.utc).strftime("%Y-%m-%d")] = round(bp, 1)
+    giorni = sorted(storico)[-400:]
+    storico = {g: storico[g] for g in giorni}
+    with open(STORICO_SPREAD, "w", encoding="utf-8") as f:
+        json.dump(storico, f, indent=1)
+    if len(giorni) >= 22:
+        return bp - storico[giorni[-22]]
+    return None
 
 
 def score_spread():
     """
-    Spread BTP-Bund (peso 15%) – livello e velocità.
+    Spread BTP-Bund (peso 15%) – 60% livello, 40% velocità (variazione ~1 mese).
 
-    Livello: lo spread assoluto (80-100 bp minimi storici recenti, oltre 180 bp tensione seria).
-    Velocità: variazione nell'ultimo mese. Un allargamento rapido (+20/30 bp) è il segnale
-    di stress più importante, anche se il livello assoluto resta moderato.
-    Pesi: 60% livello, 40% velocità.
-
-    Fonte principale: Stooq, dato giornaliero.
-    Ripiego: BCE, media mensile (solo livello, segnalato in data.json come non aggiornato).
+    Livello, in ordine: valore manuale -> Stooq (giornaliero) -> CNBC (ultima quotazione).
+    Velocità, in ordine: storico Stooq -> storico salvato in spread_storico.json
+      -> differenza rispetto all'ultima media mensile BCE (approssimazione transitoria).
+    Se nessuna fonte aggiornata risponde, il fattore vale 50 (neutro): un dato vecchio
+    di settimane non deve spostare il segnale.
     """
-    var_1m = None
+    errori, bp, var, fonte = [], None, None, None
+
     if SPREAD_BP_MANUALE is not None:
         bp, fonte = float(SPREAD_BP_MANUALE), "valore manuale"
     else:
-        try:
-            bp, var_1m, giorno = spread_giornaliero()
-            fonte = f"Stooq, chiusura {giorno}"
-        except Exception as e:
-            errore = f"{type(e).__name__}: {e}"[:80]
+        for nome, funz in (("Stooq", spread_stooq), ("CNBC", spread_cnbc)):
             try:
-                it, mese = rendimento_bce("IT")
-                de, _    = rendimento_bce("DE")
-                bp, fonte = (it - de) * 100, f"BCE media mensile {mese} (giornaliero non disponibile: {errore})"
-            except Exception as e2:
-                stato["spread"] = f"nessuna fonte disponibile ({type(e2).__name__})"
-                return 50.0
+                bp, var, fonte = funz()
+                break
+            except Exception as e:
+                errori.append(f"{nome}: {type(e).__name__}: {e}"[:160])
+
+    if errori:
+        raw["spread_errori"] = errori
+
+    if bp is None:
+        try:
+            bce, mese = spread_bce()
+            raw["spread_bp_bce_mensile"] = round(bce, 1)
+            raw["spread_fonte"] = f"nessun dato aggiornato; ultima media BCE {mese}"
+        except Exception:
+            raw["spread_fonte"] = "nessuna fonte disponibile"
+        stato["spread"] = "dato non aggiornato, fattore neutro"
+        return 50.0
+
+    if fonte != "valore manuale":
+        var_storico = aggiorna_storico(bp)
+        if var is None:
+            var = var_storico
+    if var is None:
+        try:
+            bce, mese = spread_bce()
+            var = bp - bce
+            fonte += f"; variazione rispetto alla media BCE {mese}"
+        except Exception:
+            pass
 
     s_livello = interp(bp, [80, 100, 130, 180, 250, 400], [90, 75, 55, 35, 15, 0])
     raw["spread_bp"] = round(bp, 1)
     raw["spread_fonte"] = fonte
-    if var_1m is None:
-        stato["spread"] = "ok" if fonte == "valore manuale" else "solo dato mensile"
-        return round(s_livello, 1)
-
-    s_velocita = interp(var_1m, [-20, 0, 15, 30], [80, 60, 35, 15])
-    raw["spread_var_1m_bp"] = round(var_1m, 1)
     stato["spread"] = "ok"
+    if var is None:
+        return round(s_livello, 1)
+    s_velocita = interp(var, [-20, 0, 15, 30], [80, 60, 35, 15])
+    raw["spread_var_1m_bp"] = round(var, 1)
     return round(0.6 * s_livello + 0.4 * s_velocita, 1)
 
 
@@ -281,7 +345,7 @@ def genera_json(score, factors):
 
 def main():
     print("=" * 50)
-    print(" MFSI / SISO – Updater v2.2")
+    print(" MFSI / SISO – Updater v2.3")
     print("=" * 50)
 
     try:
