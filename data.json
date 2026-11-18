@@ -1,29 +1,30 @@
 {
-  "score": 50.7,
-  "date": "Aggiornato il 17/11/2026",
-  "timestamp": "2026-11-17T04:20:18.111754+00:00",
+  "score": 53.5,
+  "date": "Aggiornato il 18/11/2026",
+  "timestamp": "2026-11-18T03:20:58.594338+00:00",
   "factors": {
-    "vix": 50.0,
-    "spread": 65.9,
-    "dxy": 29.1,
-    "gold": 76.8,
-    "mom": 43.7
+    "vix": 58.6,
+    "spread": 69.3,
+    "dxy": 27.8,
+    "gold": 77.2,
+    "mom": 38.7
   },
   "raw": {
+    "vix": 25.46,
     "spread_errori": [
       "Stooq: ValueError: risposta non valida per 10ity.b: '<!DOCTYPE html><html><head><meta charset=\"utf-8\"><meta name=\"robots\" content=\"noindex,nofo'"
     ],
-    "spread_bp": 108.4,
+    "spread_bp": 105.9,
     "spread_fonte": "CNBC, ultima quotazione",
-    "spread_var_1m_bp": -0.7,
-    "dxy": 103.48,
-    "dxy_var_3m_pct": 4.71,
-    "oro_vs_borsa_4sett_pct": -3.36,
-    "borsa_dist_sma200_pct": 1.01,
-    "borsa_dist_sma50_pct": -3.2
+    "spread_var_1m_bp": -6.8,
+    "dxy": 103.63,
+    "dxy_var_3m_pct": 4.78,
+    "oro_vs_borsa_4sett_pct": -3.44,
+    "borsa_dist_sma200_pct": -0.05,
+    "borsa_dist_sma50_pct": -4.11
   },
   "status": {
-    "vix": "dati mancanti",
+    "vix": "ok",
     "spread": "ok",
     "dxy": "ok",
     "gold": "ok",
